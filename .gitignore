@@ -1,0 +1,6 @@
+images
+server/interfaces/__pycache__
+src/interfaces/__pycache__
+tts/__pycache__
+tts/cloned_samples
+tts/tts_out
