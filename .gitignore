@@ -8,3 +8,7 @@ src/interfaces/companion.db
 src/interfaces/role.ini
 src/interfaces/schedule.json
 src/interfaces/screens
+ai/interfaces/__pycache__
+ai/interfaces/screens
+ai/interfaces/role.ini
+ai/interfaces/schedule.json
