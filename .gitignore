@@ -12,3 +12,4 @@ ai/interfaces/__pycache__
 ai/interfaces/screens
 ai/interfaces/role.ini
 ai/interfaces/schedule.json
+ai/interfaces/companion.db
