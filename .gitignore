@@ -4,3 +4,7 @@ src/interfaces/__pycache__
 tts/__pycache__
 tts/cloned_samples
 tts/tts_out
+src/interfaces/companion.db
+src/interfaces/role.ini
+src/interfaces/schedule.json
+src/interfaces/screens
