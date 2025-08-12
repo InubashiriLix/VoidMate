@@ -7,6 +7,7 @@ import torch
 import pathlib
 from pathlib import Path
 
+import winsound
 import soundfile as sf
 
 from TTS.api import TTS
@@ -310,45 +311,71 @@ if __name__ == "__main__":
         pretrained_model_name=MODEL_NAME,  # noqa
         wav_path=["tts/cloned_samples/output_merged.wav"],
         source_wav_language="jp",
-        output_lang="jp",
+        output_lang="en-us",
+        # output_lang="zh-cn",
     )
 
     t0 = time.time()
-    spk.inference(
-        {"text": "おはようございます。テストを始めます。", "emotion": "neutral"}
-    )
-    spk.inference(
-        {"text": "おはようございます。テストを始めます。", "emotion": "whisper"}
-    )
-    spk.inference(
-        {"text": "おはようございます。テストを始めます。", "emotion": "happy"}
-    )
-    spk.inference(
-        {"text": "おはようございます。テストを始めます。", "emotion": "comforting"}
-    )
-    spk.inference(
-        {"text": "おはようございます。テストを始めます。", "emotion": "lullaby"}
-    )
-    spk.inference(
-        {"text": "おはようございます。テストを始めます。", "emotion": "flirty"}
-    )
-
-    # spk.inference({"text": "好的，我们开始吧。", "emotion": "excited", "pad_ms": 150})
     # spk.inference(
-    #     {
-    #         "text": "我要把你认识的所有人都在你面前一个,一个杀掉! 你活该！",
-    #         "emotion": "angry",
-    #     }
+    #     {"text": "おはようございます。テストを始めます。", "emotion": "neutral"}
     # )
     # spk.inference(
+    #     {"text": "おはようございます。テストを始めます。", "emotion": "whisper"}
+    # )
+    # spk.inference(
+    #     {"text": "おはようございます。テストを始めます。", "emotion": "happy"}
+    # )
+    # spk.inference(
+    #     {"text": "おはようございます。テストを始めます。", "emotion": "comforting"}
+    # )
+    # spk.inference(
+    #     {"text": "おはようございます。テストを始めます。", "emotion": "lullaby"}
+    # )
+    # spk.inference(
+    #     {"text": "おはようございます。テストを始めます。", "emotion": "flirty"}
+    # )
+
+    # spk.inference({"text": "测试开始", "emotion": "neutral", "pad_ms": 150})
+    # spk.inference(
+    #     {"text": "这里是犬走椛，开始测试", "emotion": "neutral", "pad_ms": 150}
+    # )
+    # spk.inference({"text": "杀了他们", "emotion": "angry", "pad_ms": 150})
+
+    # spk.inference({"text": "测试开始", "emotion": "neutral", "pad_ms": 150})
+    # spk.inference(
     #     {
-    #         "text": "你妈大逼人人插，左插插右插插！",
-    #         "emotion": "angry",
+    #         "text": "盖伦,发发！盖伦,发发！盖伦,发发！盖伦,发发！盖伦,发发！盖伦,发发！盖伦,发发！盖伦,发发！盖伦,发发！盖伦,发发！盖伦,发发！",
+    #         "emotion": "neutral",
+    #         "pad_ms": 150,
     #     }
     # )
 
     out_wav, out_json = spk.play(out_wav="smoketest.wav")  # -> tts_out/smoketest.wav
     dt = time.time() - t0
+
+    winsound.PlaySound(
+        "E:/0-19_VoidMate/Inubashiri/tts/tts_out/smoketest.wav", winsound.SND_FILENAME
+    )
+
+    while True:
+        test_input: str = input()
+        test_emotion: str = input()
+
+        if test_emotion not in spk.presets.keys():
+            test_emotion = "neutral"
+
+        print(spk.presets.keys())
+
+        if test_input.lower() == "exit":
+            print("[SMOKE] exiting...")
+            break
+
+        spk.inference({"text": test_input, "emotion": test_emotion, "pad_ms": 150})
+        spk.play(out_wav="smoketest.wav")  # -> tts_out/smoketest.wav
+        winsound.PlaySound(
+            "E:/0-19_VoidMate/Inubashiri/tts/tts_out/smoketest.wav",
+            winsound.SND_FILENAME,
+        )
 
     # 打印结果与简单校验
     print(f"[SMOKE] done in {dt:.2f}s")

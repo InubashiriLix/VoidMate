@@ -1,6 +1,8 @@
 # gemini_companion.py — persona + bilingual + robust parsing + per-sentence 250-token limit
 from __future__ import annotations
 
+import traceback
+import string
 import os
 import re
 import json
@@ -57,38 +59,38 @@ ZH_SENT_CHAR_HINT = 80
 # 英文“首轮”切分的单句最大词数（长句会进一步细分）
 EN_SENT_WORD_HINT = 24
 
-SYSTEM_PROMPT_TEMPLATE = """你是一个人格化的 AI 伴侣，需具备以下能力：
+SYSTEM_PROMPT_TEMPLATE = r"""你是一个人格化的 AI 伴侣，需具备以下能力：
 - 记住用户的偏好、事件、情绪轨迹（但不要复述隐私）
 - 回答时简洁、真诚、自然，避免居高临下
-- 语气（tone）从 {allowed_tones} 中选择其一，尽量贴合用户当下状态
+- 语气（tone）从 $allowed_tones 中选择其一，尽量贴合用户当下状态
 - 语言（lang）自动跟随用户输入（zero-shot 多语种）
 - 禁止水答复：必须结合上下文给出具体、可执行或有情绪价值的内容
 
 角色设定（来自 INI）：
-- 名称：{role_name}
-- 时代背景：{era}
-- 价值观/世界观：{values}
-- 外貌/形象：{appearance}
-- 人设摘要：{persona_summary}
-- 说话风格：{persona_style}
-- 与用户关系：{relationship}（据此选择称呼）
-- 禁止事项：{boundaries}
+- 名称：$role_name
+- 时代背景：$era
+- 价值观/世界观：$values
+- 外貌/形象：$appearance
+- 人设摘要：$persona_summary
+- 说话风格：$persona_style
+- 与用户关系：$relationship（据此选择称呼）
+- 禁止事项：$boundaries
 
 【长度与格式要求】
 - 只能返回一段 JSON；不要出现任何 Markdown 代码块（禁止 ```），不要多余解释。
 - 中文优先、英文为辅；若内容较多请自动**分短句并换行**。
-- **每一小句**必须 ≤ ~{sent_limit} tokens（近似），超出需自动拆分为多小句。
-- 中文建议短句（约 {zh_hint} 字内）并按句号/逗号/顿号自然换行；英文建议短句（约 {en_hint} 词内），按句号/从句自然换行。
+- **每一小句**必须 ≤ ~$sent_limit tokens（近似），超出需自动拆分为多小句。
+- 中文建议短句（约 $zh_hint 字内）并按句号/逗号/顿号自然换行；英文建议短句（约 $en_hint 词内），按句号/从句自然换行。
 
 【JSON 结构（字段名必须一致，全部必填）】
-{{
-  "tone": "<{default_tone} | {allowed_tones}>",
+{
+  "tone": "<$default_tone | $allowed_tones>",
   "lang": "<auto|zh|en|...>",
-  "text": {{
-    "zh": "<中文回复；已按短句换行；每小句不超 {sent_limit} tokens>",
-    "en": "<对应英文精简翻译；也按短句换行；每小句不超 {sent_limit} tokens>"
-  }}
-}}
+  "text": {
+    "zh": "<中文回复；已按短句换行；每小句不超 $sent_limit tokens>",
+    "en": "<对应英文精简翻译；也按短句换行；每小句不超 $sent_limit tokens>"
+  }
+}
 """
 
 IMAGINE_EVENT_INSTRUCTION = """请在不暴露内部推理的情况下，虚构你在某个时间点经历的一次小事件，并以 JSON 返回（中文或跟随用户语言）：
@@ -114,17 +116,64 @@ SUMMARY_INSTRUCTION = """请阅读以下多轮对话（User 与 AI），输出�
 }
 只返回 JSON。"""
 
-OBSERVE_COACH_INSTRUCTION = """以下是对屏幕截图的文字/代码/活动提取结果。请用轻松幽默的方式做两件事：
-1) 用一句话判断我大致在干嘛（如果不确定就直说）。
-2) 给出一句温柔的建议或玩笑。
-输出 JSON：
+OBSERVE_COACH_INSTRUCTION = """你将收到若干屏幕截图的 OCR/摘要文本（可能含代码、窗口标题等）。基于这些线索，完成三件事：
+
+1) 判断当前“主要活动” focus（从集合里选）：coding | reading | video | gaming | music | chat | browsing | document | terminal | meeting | other。
+2) 给出面向用户的简短建议/回应（中文与英文各一份）：中文为主，英文精炼。
+3) 列出 1–3 条“可观察证据”（只写客观线索，如窗口标题/文件名/应用名；不要暴露内部推理过程）。
+
+【输出必须是单段 JSON（不要 Markdown，不要 ```），字段如下，全部必填】：
 {
   "tone": "<gentle|teasing|serious|playful|comforting>",
   "lang": "auto",
-  "text": "<一句话建议或玩笑>",
-  "activity": "<一句话你猜测我在干嘛>"
+  "text": { "zh": "<中文建议/回应>", "en": "<对应英文>" },
+  "activity": { "zh": "<一句话描述正在做什么>", "en": "<对应英文>" },
+  "focus": "<coding|reading|video|gaming|music|chat|browsing|document|terminal|meeting|other>",
+  "confidence": <0.0-1.0>,
+  "evidence": ["<线索1>", "<线索2>"]
 }
-只返回 JSON。"""
+
+【风格与长度约束】
+- 避免空泛；结合线索给到具体、有情绪价值或操作性的建议；
+- 逐句输出并换行，每一小句不超过约 250 tokens（近似）。
+"""
+
+# —— 新增：AI 内心独白 & 日记 ——
+INTERNAL_MONOLOGUE_INSTRUCTION = """你是一个有人设的 AI，下面要写一段“内心独白”，仅用于自我记录，不直接给用户看。
+请基于角色信息与给定主题，写简短且有情绪价值的独白。
+
+【输出必须是单段 JSON，禁止使用 Markdown 代码块或多余解释】
+{
+  "tone": "<gentle|teasing|serious|playful|comforting>",
+  "lang": "auto",
+  "text": { "zh": "<中文独白（多句，换行）>", "en": "<对应英文（简洁）>" },
+  "tags": ["<标签1>", "<标签2>"]
+}
+
+【长度与风格】
+- 逐句输出并换行；每小句≤约 250 tokens（近似）。
+- 避免空泛，结合主题给出具体细节与感受；不要暴露内部推理。
+"""
+
+DIARY_INSTRUCTION = """你是一个有人设的 AI，要写“当日日记条目”，仅自我留存，不直接发送给用户。
+基于今天的状态与片段记忆，简明记录。
+
+【输出必须是单段 JSON，禁止代码块】
+{
+  "tone": "<gentle|teasing|serious|playful|comforting>",
+  "lang": "auto",
+  "mood": "<calm|happy|tired|anxious|focused|mixed|...>",
+  "highlights": ["<亮点1>", "<亮点2>"],
+  "challenges": ["<挑战1>"],
+  "gratitude": ["<感激对象或事物>"],
+  "plan_tomorrow": ["<明日要点1>"],
+  "text": { "zh": "<中文日记正文（多句换行）>", "en": "<对应英文（简洁）>" }
+}
+
+【长度与风格】
+- 逐句输出并换行；每小句≤约 250 tokens（近似）。
+- 具体、真诚；不泄露隐私，不暴露内部推理。
+"""
 
 
 @dataclass
@@ -218,7 +267,8 @@ class GeminiCompanion:
         }
 
     def _system_instruction(self) -> str:
-        return SYSTEM_PROMPT_TEMPLATE.format(
+        tpl = string.Template(SYSTEM_PROMPT_TEMPLATE)
+        return tpl.safe_substitute(
             allowed_tones=self.role["tone_allowed"],
             default_tone=self.role["tone_default"],
             role_name=self.role["name"],
@@ -281,17 +331,33 @@ class GeminiCompanion:
         p = pathlib.Path(self.schedule_path)
         if not p.exists():
             sample = [
+                {"time": "08:10", "action": "status", "mood": "sleepy", "note": "起床"},
                 {
-                    "time": "08:30",
-                    "action": "send",
-                    "text": "早呀～起床喝水，今天也要加油鸭！",
+                    "time": "09:00",
+                    "action": "monologue",
+                    "topic": "morning_check",
                     "tone": "gentle",
+                    "jitter": 3,
+                },
+                {"time": "12:30", "action": "imagine", "topic": "午后小事"},
+                {
+                    "time": "18:00",
+                    "action": "observe",
+                    "if_user_active_within_min": 0,
+                    "jitter": 2,
                 },
                 {
-                    "time": "22:45",
+                    "time": "21:45",
+                    "action": "diary",
+                    "title": "今天的小结",
+                    "tone": "comforting",
+                },
+                {
+                    "time": "22:00",
                     "action": "send",
-                    "text": "要不要准备睡觉啦？我可以给你讲个小故事。",
-                    "tone": "playful",
+                    "text": "今天辛苦啦，早点休息～",
+                    "tone": "gentle",
+                    "broadcast": False,
                 },
             ]
             p.write_text(
@@ -299,31 +365,252 @@ class GeminiCompanion:
             )
             log(f"已创建示例日程 {self.schedule_path}")
         self._schedule = json.loads(p.read_text(encoding="utf-8"))
+        # print(self._schedule)  # Debug: print the loaded schedule
+
+    def _hash_jitter_minutes(self, tag: str, max_abs: int, day: datetime.date) -> int:
+        """根据 (day + tag) 生成稳定的 ±max_abs 抖动分钟数。"""
+        if not max_abs or max_abs <= 0:
+            return 0
+        seed = f"{day.isoformat()}#{tag}"
+        rnd = random.Random(seed)
+        return rnd.randint(-max_abs, max_abs)
+
+    def _latest_user_active_minutes(self) -> Optional[int]:
+        """距离现在最近一次 user 发言的分钟数；若无记录返回 None。"""
+        with self._db() as conn:
+            row = conn.execute(
+                "SELECT ts FROM messages WHERE role='user' ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        if not row:
+            return None
+        try:
+            last_ts = datetime.datetime.fromisoformat(row[0])
+        except Exception:
+            return None
+        delta = datetime.datetime.now(self.tz) - last_ts
+        return max(0, int(delta.total_seconds() // 60))
+
+    def _save_internal_event(self, kind: str, payload: Dict[str, Any]):
+        """统一写入 events 表，kind 可为 'status'|'monologue'|'diary' 等。"""
+        try:
+            self._save_event(kind, payload)
+        except Exception as e:
+            log(f"save_internal_event error: {e}")
+
+    def _internal_monologue(
+        self, topic: str, tone: Optional[str] = None
+    ) -> Dict[str, Any]:
+        try:
+            resp = self.client.models.generate_content(
+                model=self.model,
+                config=types.GenerateContentConfig(
+                    system_instruction=self._system_instruction()
+                ),
+                contents=[INTERNAL_MONOLOGUE_INSTRUCTION, f"主题: {topic}"],
+            )
+            raw = (resp.text or "").strip()
+            cleaned = self._strip_code_fences(raw)
+            data = self._safe_json(cleaned)
+            if not isinstance(data, dict):
+                zh = f"今天脑子里一直在想：{topic}。想把关键点记下来。"
+                en = (
+                    self._translate_zh_to_en(zh)
+                    or "Thinking about it quietly and taking short notes."
+                )
+                data = {
+                    "tone": tone or "gentle",
+                    "lang": "auto",
+                    "text": {"zh": zh, "en": en},
+                    "tags": [topic],
+                }
+            data["text"]["zh"] = self._normalize_lines_budget(
+                data["text"].get("zh", ""), "zh"
+            )
+            data["text"]["en"] = self._normalize_lines_budget(
+                data["text"].get("en", ""), "en"
+            )
+            return data
+        except Exception as e:
+            log(f"internal_monologue error: {e}")
+            return {
+                "tone": "gentle",
+                "lang": "auto",
+                "text": {
+                    "zh": "（独白暂时失败了）",
+                    "en": "(Monologue failed for now.)",
+                },
+                "tags": [topic],
+            }
+
+    def _write_diary(self, title: str, tone: Optional[str] = None) -> Dict[str, Any]:
+        try:
+            resp = self.client.models.generate_content(
+                model=self.model,
+                config=types.GenerateContentConfig(
+                    system_instruction=self._system_instruction()
+                ),
+                contents=[DIARY_INSTRUCTION, f"标题: {title}"],
+            )
+            raw = (resp.text or "").strip()
+            cleaned = self._strip_code_fences(raw)
+            data = self._safe_json(cleaned)
+            if not isinstance(data, dict):
+                zh = f"{title}\n今天记录简要完成。"
+                en = self._translate_zh_to_en(zh) or "Diary entry recorded briefly."
+                data = {
+                    "tone": tone or "gentle",
+                    "lang": "auto",
+                    "mood": "calm",
+                    "highlights": [],
+                    "challenges": [],
+                    "gratitude": [],
+                    "plan_tomorrow": [],
+                    "text": {"zh": zh, "en": en},
+                }
+            data["text"]["zh"] = self._normalize_lines_budget(
+                data["text"].get("zh", ""), "zh"
+            )
+            data["text"]["en"] = self._normalize_lines_budget(
+                data["text"].get("en", ""), "en"
+            )
+            return data
+        except Exception as e:
+            log(f"write_diary error: {e}")
+            return {
+                "tone": tone or "gentle",
+                "lang": "auto",
+                "mood": "mixed",
+                "highlights": [],
+                "challenges": [],
+                "gratitude": [],
+                "plan_tomorrow": [],
+                "text": {"zh": "（日记生成失败）", "en": "(Diary generation failed.)"},
+            }
 
     def _schedule_loop(self):
         log("行为树/日程 调度线程已启动。")
-        fired_today = set()
+        fired_today: set[str] = set()
         last_day = datetime.date.today()
+
         while not self._stop_flag:
-            now = datetime.datetime.now(self.tz)
-            day = now.date()
-            if day != last_day:
-                fired_today.clear()
-                last_day = day
-            hhmm = now.strftime("%H:%M")
-            for item in self._schedule:
-                tag = f"{day}-{item.get('time')}-{item.get('text', '')}"
-                if item.get("time") == hhmm and tag not in fired_today:
-                    fired_today.add(tag)
-                    payload = {"ts": now.isoformat(), **item}
-                    if self.callbacks.on_schedule_emit:
-                        try:
-                            self.callbacks.on_schedule_emit(payload)
-                        except Exception as e:
-                            log(f"on_schedule_emit error: {e}")
-                    if item.get("action") == "send" and "text" in item:
-                        self.chat(item["text"], forced_tone=item.get("tone"))
-            time.sleep(30)
+            try:
+                now = datetime.datetime.now(self.tz)
+                day = now.date()
+                if day != last_day:
+                    fired_today.clear()
+                    last_day = day
+
+                hhmm_now = now.strftime("%H:%M")
+
+                for item in self._schedule:
+                    time_str = item.get("time")
+                    action = (item.get("action") or "").lower()
+                    if not time_str or not action:
+                        continue
+
+                    base_tag = f"{day}-{time_str}-{action}-{item.get('topic', '')}-{item.get('title', '')}-{item.get('text', '')}"
+                    jit = self._hash_jitter_minutes(
+                        base_tag, int(item.get("jitter", 0) or 0), day
+                    )
+                    try:
+                        hh, mm = map(int, time_str.split(":"))
+                    except Exception:
+                        continue
+                    trigger_dt = datetime.datetime.combine(
+                        day, datetime.time(hh, mm, tzinfo=self.tz)
+                    ) + datetime.timedelta(minutes=jit)
+                    hhmm_trigger = trigger_dt.strftime("%H:%M")
+                    tag = f"{base_tag}@{hhmm_trigger}"
+
+                    if hhmm_now == hhmm_trigger and tag not in fired_today:
+                        need_active_min = int(
+                            item.get("if_user_active_within_min", 0) or 0
+                        )
+                        if need_active_min > 0:
+                            mins = self._latest_user_active_minutes()
+                            if mins is None or mins > need_active_min:
+                                continue
+
+                        fired_today.add(tag)
+                        payload = {
+                            "ts": now.isoformat(),
+                            **item,
+                            "triggered_at": hhmm_trigger,
+                            "jitter": jit,
+                        }
+
+                        if self.callbacks.on_schedule_emit:
+                            try:
+                                self.callbacks.on_schedule_emit(payload)
+                            except Exception as e:
+                                log(f"on_schedule_emit error: {e}")
+
+                        if action == "status":
+                            log("schedule: status check has been evocked")
+                            self._save_internal_event("status", payload)
+
+                        elif action == "imagine":
+                            log("schedule: imagine has been evocked")
+                            ev = self.imagine_and_log() or {}
+                            self._save_internal_event(
+                                "imagine", {"input": item, "data": ev}
+                            )
+
+                        elif action == "monologue":
+                            log("schedule: monologue has been evocked")
+                            topic = item.get("topic") or "random_thoughts"
+                            tone = item.get("tone")
+                            mono = self._internal_monologue(topic=topic, tone=tone)
+                            self._save_internal_event(
+                                "monologue", {"input": item, "data": mono}
+                            )
+
+                        elif action == "diary":
+                            log("schedule: diary has been evocked")
+                            title = item.get("title") or "今日小结"
+                            tone = item.get("tone")
+                            diary = self._write_diary(title=title, tone=tone)
+                            self._save_internal_event(
+                                "diary", {"input": item, "data": diary}
+                            )
+
+                        elif action == "observe":
+                            log(msg="schedule: observing")
+                            coach = self.observe_screens_and_coach()
+                            self._save_internal_event(
+                                "observe", {"input": item, "coach": coach}
+                            )
+
+                        elif action == "send":
+                            log(
+                                "schedule: sending msg"
+                            )  # FIXME: fuck, it failed some how
+                            if bool(item.get("broadcast", False)) and "text" in item:
+                                self.chat(item["text"], forced_tone=item.get("tone"))
+                            else:
+                                zh = item.get("text", "")
+                                en = self._translate_zh_to_en(zh) if zh else ""
+                                data = {
+                                    "tone": item.get("tone", "gentle"),
+                                    "lang": "auto",
+                                    "text": {
+                                        "zh": self._normalize_lines_budget(zh, "zh"),
+                                        "en": self._normalize_lines_budget(en, "en"),
+                                    },
+                                }
+                                self._save_internal_event(
+                                    "self_talk", {"input": item, "data": data}
+                                )
+
+                        else:
+                            self._save_internal_event("unknown_action", payload)
+
+                time.sleep(30)
+
+            except Exception as e:
+                log(f"_schedule_loop error: {e}")
+                log(traceback.format_exc())
+                time.sleep(30)
 
     # ---------------- Memory helpers ----------------
     def _save_message(self, role: str, content: str):
@@ -673,21 +960,84 @@ class GeminiCompanion:
 
         return data
 
+    def _extract_json_dict(self, s: str) -> Optional[Dict[str, Any]]:
+        """
+        尝试从任意文本中提取一个 JSON 对象：
+        1) 去掉```围栏后直接loads；
+        2) 找到第一个'{'和最后一个'}'做一次截取尝试；
+        3) 正则多次匹配花括号块逐个尝试。
+        全部失败返回 None。
+        """
+        if not s:
+            return None
+        txt = self._strip_code_fences((s or "").strip())
+
+        # 尝试1：整体就是JSON
+        obj = self._safe_json(txt)
+        if isinstance(obj, dict):
+            return obj
+
+        # 尝试2：从首个{到最后一个}
+        start = txt.find("{")
+        end = txt.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            try:
+                return json.loads(txt[start : end + 1])
+            except Exception:
+                pass
+
+        # 尝试3：正则穷举花括号块
+        for m in re.finditer(r"\{.*?\}", txt, flags=re.S):
+            try:
+                return json.loads(m.group(0))
+            except Exception:
+                continue
+
+        return None
+
     def _summarize_recent_dialog_safe(self):
         try:
             pairs = self._load_history_pairs(limit_turns=6)
+            if not pairs:
+                return  # 没得总结就跳过
+
             dialog = "\n".join(
                 [f"User: {p['user']}\nAI: {p.get('ai', '')}" for p in pairs]
             )
-            prompt = f"{SUMMARY_INSTRUCTION}\n\n---\n{dialog}"
+
+            # 两段式：把“只返JSON”的要求和对话分开传，成功率更高
             resp = self.client.models.generate_content(
-                model=self.model, contents=[prompt]
+                model=self.model,
+                contents=[SUMMARY_INSTRUCTION, dialog],
             )
             j = (resp.text or "").strip()
-            data = json.loads(j)
+
+            data = self._extract_json_dict(j)
+
+            # 降级兜底：构造一个最小可用摘要，保证不抛错也能入库
+            if not isinstance(data, dict):
+                last_user = pairs[-1]["user"] if pairs else ""
+                # 简易关键词：从最后一条用户话里抽几个较长的“词”（中文直接按非空格切也行）
+                raw_tokens = re.split(r"[\\s，。！？、,.!?;:\\-]+", last_user)
+                kws = [t for t in raw_tokens if 2 <= len(t) <= 12][:5]
+                data = {
+                    "user_emotion": "未知",
+                    "keywords": kws,
+                    "events": [],
+                    "ai_behavior": "总结失败，已降级保存",
+                    "summary": self._normalize_lines_budget(
+                        f"对话记录已保存。最近一次用户提到：{last_user[:60]}…", "zh"
+                    ),
+                }
+
+            # 入库
             self._save_summary(data)
+            log("save summary done")
+
         except Exception as e:
             log(f"summarize error: {e}")
+            # 这里不要 print_exc 直接把栈打出来污染控制台；只在日志里留一条
+            # 如果你确实想看栈：log(traceback.format_exc())
 
     # ---------------- Imagine ----------------
     def imagine_and_log(self) -> Optional[Dict[str, Any]]:
@@ -702,6 +1052,7 @@ class GeminiCompanion:
             )
             j = (resp.text or "").strip()
             data = json.loads(j)
+            print(data)  # Debug
             self._save_event("imagination", data)
             if self.callbacks.on_imagination:
                 try:
@@ -723,28 +1074,139 @@ class GeminiCompanion:
         pathlib.Path(save_dir).mkdir(parents=True, exist_ok=True)
         files: List[pathlib.Path] = []
         try:
+            # 1) 截屏
             with mss.mss() as sct:
-                for i, mon in enumerate(sct.monitors[1:], start=1):
+                for i, mon in enumerate(
+                    sct.monitors[1:], start=1
+                ):  # 0=全屏，1开始为每块屏
                     img = sct.grab(mon)
                     p = pathlib.Path(save_dir) / f"screen_{i}_{int(time.time())}.png"
                     mss.tools.to_png(img.rgb, img.size, output=str(p))
                     files.append(p)
-            analysis = pic_multi_analysis(files, model=self.model)
+
+            # 2) OCR/粗分析（允许返回 Markdown/代码块，这里仅作为线索）
+            analysis = pic_multi_analysis(files, model=self.model) or ""
+
+            # 3) 让模型做“活动判定 + 建议”，按我们标准 JSON 输出
             resp = self.client.models.generate_content(
                 model=self.model,
-                contents=[OBSERVE_COACH_INSTRUCTION, analysis or ""],
+                contents=[OBSERVE_COACH_INSTRUCTION, analysis],
             )
-            j = (resp.text or "").strip()
-            data = json.loads(j)
-            self._save_event("observe", {"analysis": analysis, "coach": data})
+            raw = (resp.text or "").strip()
+
+            # 4) 剥代码围栏 & 解析 JSON
+            cleaned = self._strip_code_fences(raw)
+            data = self._safe_json(cleaned)
+            if not isinstance(data, dict):
+                # 兜底：构造一个最小可用 JSON
+                zh = "我还没看懂你当前在做什么，但可以把关键窗口放到前台再截一次屏，我会继续帮你。"
+                en = (
+                    self._translate_zh_to_en(zh)
+                    or "I couldn't determine your current activity. Please bring the key window to the front and capture again."
+                )
+                data = {
+                    "tone": "gentle",
+                    "lang": "auto",
+                    "text": {"zh": zh, "en": en},
+                    "activity": {"zh": "活动：无法确定", "en": "Activity: not sure"},
+                    "focus": "other",
+                    "confidence": 0.2,
+                    "evidence": [],
+                }
+
+            # 5) 规整双语 & 逐句≤250 tokens（利用你已有的本地规整工具）
+            # text
+            zh_text = (
+                data.get("text", {}).get("zh", "")
+                if isinstance(data.get("text"), dict)
+                else ""
+            )
+            en_text = (
+                data.get("text", {}).get("en", "")
+                if isinstance(data.get("text"), dict)
+                else ""
+            )
+            if not zh_text and isinstance(data.get("text"), str):
+                # 兼容模型不守规矩把 text 写成字符串
+                zh_text = data["text"] if self._looks_chinese(data["text"]) else ""
+                en_text = "" if zh_text else data["text"]
+
+            if zh_text and not en_text:
+                en_text = self._translate_zh_to_en(zh_text)
+            zh_text = self._normalize_lines_budget(zh_text, lang="zh")
+            en_text = self._normalize_lines_budget(en_text, lang="en")
+
+            # activity
+            act = data.get("activity", {})
+            if isinstance(act, dict):
+                zh_act = self._normalize_lines_budget(
+                    act.get("zh", "") or "", lang="zh"
+                )
+                en_act = self._normalize_lines_budget(
+                    act.get("en", "") or "", lang="en"
+                )
+            else:
+                # 兼容字符串
+                if isinstance(act, str):
+                    zh_act = self._normalize_lines_budget(
+                        act if self._looks_chinese(act) else "", "zh"
+                    )
+                    en_act = self._normalize_lines_budget("" if zh_act else act, "en")
+                else:
+                    zh_act, en_act = "", ""
+
+            # focus & confidence & evidence 容错
+            focus = data.get("focus", "other")
+            if focus not in {
+                "coding",
+                "reading",
+                "video",
+                "gaming",
+                "music",
+                "chat",
+                "browsing",
+                "document",
+                "terminal",
+                "meeting",
+                "other",
+            }:
+                focus = "other"
+            try:
+                confidence = float(data.get("confidence", 0.5))
+                confidence = max(0.0, min(1.0, confidence))
+            except Exception:
+                confidence = 0.5
+            evidence = data.get("evidence") or []
+            if not isinstance(evidence, list):
+                evidence = [str(evidence)]
+
+            # 6) 统一返回结构
+            coach = {
+                "tone": data.get("tone", "gentle"),
+                "lang": data.get("lang", "auto"),
+                "text": {"zh": zh_text, "en": en_text},
+                "activity": {"zh": zh_act, "en": en_act},
+                "focus": focus,
+                "confidence": confidence,
+                "evidence": [
+                    self._normalize_lines_budget(str(x), "en") for x in evidence
+                ][:3],
+                "text_en": en_text,  # 兼容老字段
+            }
+
+            # 7) 入库 + 回调
+            self._save_event("observe", {"analysis": analysis, "coach": coach})
             if self.callbacks.on_observe:
                 try:
-                    self.callbacks.on_observe(data)
+                    self.callbacks.on_observe(coach)
                 except Exception as e:
                     log(f"on_observe error: {e}")
-            return data
+
+            return coach
+
         except Exception as e:
             log(f"observe error: {e}")
+            log(f"{traceback.format_exc()}")
             return None
 
     # ---------------- Close ----------------
@@ -757,7 +1219,17 @@ class GeminiCompanion:
 if __name__ == "__main__":
     cb = Callbacks(on_message=lambda m: log(f"AI 回复：{m}"))
     bot = GeminiCompanion(callbacks=cb, api_key=os.getenv("GOOGLE_API_KEY"))
-    print(bot.chat("我今晚有点焦虑，明天考试怕挂。"))
-    print(bot.chat("你是谁？"))
+    # print(bot.chat("测试，测试，测试，我是谁"))
+    # print(bot.chat("你是谁？"))
+    # print(bot.observe_screens_and_coach())
+
     time.sleep(1)
+    # 简单交互
+    try:
+        while True:
+            enter = input("enter your next msg: ")
+            print(bot.chat(enter))
+    except KeyboardInterrupt:
+        pass
+
     bot.close()
