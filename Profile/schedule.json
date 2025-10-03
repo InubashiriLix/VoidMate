@@ -1,0 +1,39 @@
+[
+  {
+    "time": "08:10",
+    "action": "status",
+    "mood": "sleepy",
+    "note": "起床"
+  },
+  {
+    "time": "09:00",
+    "action": "monologue",
+    "topic": "morning_check",
+    "tone": "gentle",
+    "jitter": 3
+  },
+  {
+    "time": "12:30",
+    "action": "imagine",
+    "topic": "午后小事"
+  },
+  {
+    "time": "18:00",
+    "action": "observe",
+    "if_user_active_within_min": 0,
+    "jitter": 2
+  },
+  {
+    "time": "21:45",
+    "action": "diary",
+    "title": "今天的小结",
+    "tone": "comforting"
+  },
+  {
+    "time": "22:00",
+    "action": "send",
+    "text": "今天辛苦啦，早点休息～",
+    "tone": "gentle",
+    "broadcast": false
+  }
+]

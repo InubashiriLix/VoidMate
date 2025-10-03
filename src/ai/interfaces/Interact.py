@@ -1,6 +1,8 @@
 # gemini_companion.py — persona + bilingual + robust parsing + per-sentence 250-token limit
 from __future__ import annotations
 
+import pathlib
+from pathlib import Path
 import traceback
 import string
 import os
@@ -12,7 +14,6 @@ import time
 import random
 import datetime
 import configparser
-import pathlib
 from dataclasses import dataclass
 from typing import Callable, Optional, List, Dict, Any
 
@@ -21,7 +22,7 @@ from google import genai
 from google.genai import types
 
 # Your multimodal analysis helper (you provided this)
-from images_apis import pic_multi_analysis
+from .images_apis import pic_multi_analysis
 
 # Optional screenshot
 try:
@@ -29,28 +30,36 @@ try:
 except Exception:
     mss = None
 
-# Pretty logs
-try:
-    from rich.console import Console  # type: ignore
+# # Pretty logs
+# try:
+from rich.console import Console  # type: ignore
 
-    console = Console()
+console = Console()
 
-    def log(msg: str):
-        console.print(f"[bold cyan][Companion][/bold cyan] {msg}")
-except Exception:
-    console = None
 
-    def log(msg: str):
-        print(f"[Companion] {msg}")
+def log(msg: str):
+    console.print(f"[bold cyan][Companion][/bold cyan] {msg}")
+
+
+# except Exception:
+#     console = None
+#
+#     def log(msg: str):
+#         print(f"[Companion] {msg}")
 
 
 # -----------------------------
 # Defaults & budgets
 # -----------------------------
-DEFAULT_ROLE_INI = "role.ini"
-DEFAULT_DB = "companion.db"
-DEFAULT_SCHEDULE = "schedule.json"
-DEFAULT_MODEL = "gemini-2.5-flash"
+class CompanionConfigs:
+    def __init__(self, root_abs_dir: Path) -> None:
+        self.root_abs_dir: Path = root_abs_dir
+
+        self.DEFAULT_ROLE_INI: str = str(root_abs_dir / "Profile/role.ini")
+        self.DEFAULT_DB: str = str(root_abs_dir / "Profile/companion.db")
+        self.DEFAULT_SCHEDULE: str = str(root_abs_dir / "Profile/schedule.json")
+        self.DEFAULT_MODEL: str = "gemini-2.5-flash"
+
 
 # 每小句 token 上限（近似）
 SENT_TOKEN_LIMIT = 250
@@ -187,19 +196,21 @@ class Callbacks:
 class GeminiCompanion:
     def __init__(
         self,
+        confs: CompanionConfigs,
         api_key: Optional[str] = None,
-        model: str = DEFAULT_MODEL,
-        role_ini: str = DEFAULT_ROLE_INI,
-        db_path: str = DEFAULT_DB,
-        schedule_path: str = DEFAULT_SCHEDULE,
         max_history_turns: int = 20,
         callbacks: Optional[Callbacks] = None,
         timezone: str = "Asia/Shanghai",
     ):
-        self.model = model
-        self.role_ini = role_ini
-        self.db_path = db_path
-        self.schedule_path = schedule_path
+        self.model = confs.DEFAULT_MODEL
+        print("[model]", self.model)
+        self.role_ini = confs.DEFAULT_ROLE_INI
+        print("[role_ini]", self.role_ini)
+        self.db_path = confs.DEFAULT_DB
+        print("[db_path]", self.db_path)
+        self.schedule_path = confs.DEFAULT_SCHEDULE
+        print("[schedule_path]", self.schedule_path)
+
         self.max_history_turns = max_history_turns
         self.callbacks = callbacks or Callbacks()
         self.tz = datetime.timezone(datetime.timedelta(hours=8))  # UTC+8
@@ -1066,7 +1077,7 @@ class GeminiCompanion:
 
     # ---------------- Observe ----------------
     def observe_screens_and_coach(
-        self, save_dir: str = "screens"
+        self, save_dir: str = "Profile/screens"
     ) -> Optional[Dict[str, Any]]:
         if mss is None:
             log("未安装 mss，无法截屏。pip install mss")
@@ -1081,7 +1092,7 @@ class GeminiCompanion:
                 ):  # 0=全屏，1开始为每块屏
                     img = sct.grab(mon)
                     p = pathlib.Path(save_dir) / f"screen_{i}_{int(time.time())}.png"
-                    mss.tools.to_png(img.rgb, img.size, output=str(p))
+                    mss.tools.to_png(img.rgb, img.size, output=str(p))  # pyright: ignore[reportAttributeAccessIssue]
                     files.append(p)
 
             # 2) OCR/粗分析（允许返回 Markdown/代码块，这里仅作为线索）
@@ -1213,23 +1224,3 @@ class GeminiCompanion:
     def close(self):
         self._stop_flag = True
         log("已请求停止调度线程。")
-
-
-# Demo (optional)
-if __name__ == "__main__":
-    cb = Callbacks(on_message=lambda m: log(f"AI 回复：{m}"))
-    bot = GeminiCompanion(callbacks=cb, api_key=os.getenv("GOOGLE_API_KEY"))
-    # print(bot.chat("测试，测试，测试，我是谁"))
-    # print(bot.chat("你是谁？"))
-    # print(bot.observe_screens_and_coach())
-
-    time.sleep(1)
-    # 简单交互
-    try:
-        while True:
-            enter = input("enter your next msg: ")
-            print(bot.chat(enter))
-    except KeyboardInterrupt:
-        pass
-
-    bot.close()

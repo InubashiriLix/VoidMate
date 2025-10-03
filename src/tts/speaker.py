@@ -26,12 +26,9 @@ try:
 except Exception:
     pass
 
-from emotion_presets import EMOTION_PRESETS
+from .emotion_presets import EMOTION_PRESETS
 
-from clone import *  # noqa
-
-
-import soundfile as sf
+from .clone import *  # noqa
 
 
 def _nowstr():
@@ -128,27 +125,87 @@ class Speaker:
         self.xtts = self._load_xtts_model(self.pretrained_model_name)
 
         # NOTE: the api is the backup method, for common cases, use self.xtts + latenet
-        print("[speaker] [init]: loading TTS api (fallback)")
-        self.tts_api = TTS(self.pretrained_model_name).to(self.device)
+        enable_fallback = os.environ.get("VOIDMATE_ENABLE_TTS_API", "0") == "1"
+        if enable_fallback:
+            try:
+                print("[speaker] [init]: loading TTS api (fallback)")
+                from TTS.api import TTS as _TTS
+
+                self.tts_api = _TTS(self.pretrained_model_name)
+                # 某些版本 TTS 对象没有 .to，判一下
+                if hasattr(self.tts_api, "to"):
+                    self.tts_api = self.tts_api.to(self.device)
+            except Exception as e:
+                self.tts_api = None
+                print(f"[speaker] [init]: fallback TTS unavailable: {e}")
+        else:
+            self.tts_api = None
+            print("[speaker] [init]: skip TTS api (fallback disabled)")
 
         print("[speaker] [init]: speaker init done")
 
     def _load_voice_profile(self):
         self.gpt_cond_latenet, self.speaker_embedding = load_latents(  # noqa
-            self.profile_name
+            self.profile_name, save_dir="Profile/voice_profiles"
         )
+
         self.gpt_cond_latenet = _to_tensor(self.gpt_cond_latenet, self.device)
         self.speaker_embedding = _to_tensor(self.speaker_embedding, self.device)
 
+    # def _load_xtts_model(self, model_name: str) -> Xtts:
+    #     # 让 ModelManager 负责下载/定位模型
+    #     from TTS.utils.manage import ModelManager
+    #     from pathlib import Path
+    #
+    #     manager = ModelManager()
+    #     model_path, config_path, _ = manager.download_model(model_name)
+    #
+    #     # —— 关键：如果 config_path 为空或不存在，自动在 model_path 附近搜 config.json ——
+    #     def _auto_find_config(mp: str | None, cp: str | None) -> str:
+    #         cands = []
+    #         if cp:
+    #             cands.append(Path(cp))
+    #         if mp:
+    #             p = Path(mp)
+    #             if p.is_dir():
+    #                 cands.append(p / "config.json")  # 常见位置
+    #                 # 兜底：递归找（只取第一个命中）
+    #                 try:
+    #                     for sub in p.rglob("config.json"):
+    #                         cands.append(sub)
+    #                         break
+    #                 except Exception:
+    #                     pass
+    #             else:
+    #                 cands.append(p.parent / "config.json")
+    #         for c in cands:
+    #             if c and c.exists():
+    #                 return str(c)
+    #         raise FileNotFoundError(
+    #             f"config.json not found near: model_path={mp!r}, config_path={cp!r}"
+    #         )
+    #
+    #     config_path = _auto_find_config(model_path, config_path)
+    #
+    #     # 正常加载 Xtts（低层接口，配合你的潜变量）
+    #     cfg = XttsConfig()
+    #     cfg.load_json(config_path)
+    #     model = Xtts.init_from_config(cfg)
+    #
+    #     ckpt_dir = str(Path(config_path).parent)
+    #     model.load_checkpoint(cfg, checkpoint_dir=ckpt_dir, eval=True)
+    #     if self.device.startswith("cuda"):
+    #         model.cuda()
+    #     return model
+
     def _load_xtts_model(self, model_name: str) -> Xtts:
-        # 让 ModelManager 负责下载/定位模型
+        # —— 下载/定位模型与 config.json —— #
         from TTS.utils.manage import ModelManager
         from pathlib import Path
 
         manager = ModelManager()
         model_path, config_path, _ = manager.download_model(model_name)
 
-        # —— 关键：如果 config_path 为空或不存在，自动在 model_path 附近搜 config.json ——
         def _auto_find_config(mp: str | None, cp: str | None) -> str:
             cands = []
             if cp:
@@ -156,8 +213,7 @@ class Speaker:
             if mp:
                 p = Path(mp)
                 if p.is_dir():
-                    cands.append(p / "config.json")  # 常见位置
-                    # 兜底：递归找（只取第一个命中）
+                    cands.append(p / "config.json")
                     try:
                         for sub in p.rglob("config.json"):
                             cands.append(sub)
@@ -175,15 +231,89 @@ class Speaker:
 
         config_path = _auto_find_config(model_path, config_path)
 
-        # 正常加载 Xtts（低层接口，配合你的潜变量）
+        # —— 常规初始化 —— #
         cfg = XttsConfig()
         cfg.load_json(config_path)
         model = Xtts.init_from_config(cfg)
+        ckpt_dir = Path(config_path).parent
 
-        ckpt_dir = str(Path(config_path).parent)
-        model.load_checkpoint(cfg, checkpoint_dir=ckpt_dir, eval=True)
+        # —— ①首选：用官方接口 + strict=False —— #
+        try:
+            # 某些版本支持 strict 参数；不支持的话下面 except TypeError 会兜底
+            model.load_checkpoint(
+                cfg, checkpoint_dir=str(ckpt_dir), eval=True, strict=False
+            )
+        except TypeError:
+            # 老签名不支持 strict，就先按默认走一次（可能 strict=True）
+            try:
+                model.load_checkpoint(cfg, checkpoint_dir=str(ckpt_dir), eval=True)
+            except RuntimeError as e:
+                # —— ②兜底：我们自己读 model.pth 并宽松加载 —— #
+                print(
+                    f"[xtts] load_checkpoint strict path failed: {e}\n[xtts] fallback to direct state_dict loading"
+                )
+                import torch
+
+                # 常见权重文件名候选
+                cand_files = [
+                    ckpt_dir / "model.pth",
+                    ckpt_dir / "best_model.pth",
+                    ckpt_dir / "pytorch_model.bin",
+                ]
+                sd = None
+                for f in cand_files:
+                    if f.exists():
+                        try:
+                            # torch 2.5+ 支持 weights_only=True，避免 pickle 风险
+                            sd = torch.load(f, map_location="cpu", weights_only=True)
+                        except TypeError:
+                            sd = torch.load(f, map_location="cpu")
+                        break
+                if sd is None:
+                    raise FileNotFoundError(f"No checkpoint file found in {ckpt_dir}")
+
+                # 部分版本把权重包在 state_dict / model 字段里
+                if (
+                    isinstance(sd, dict)
+                    and "state_dict" in sd
+                    and isinstance(sd["state_dict"], dict)
+                ):
+                    sd = sd["state_dict"]
+                if (
+                    isinstance(sd, dict)
+                    and "model" in sd
+                    and isinstance(sd["model"], dict)
+                ):
+                    sd = sd["model"]
+
+                if not isinstance(sd, dict):
+                    raise RuntimeError(f"Unexpected checkpoint format: {type(sd)}")
+
+                # 统一去掉常见前缀
+                def _strip_prefix(
+                    d, prefixes=("module.", "model.", "tts_model.", "tts.")
+                ):
+                    out = {}
+                    for k, v in d.items():
+                        kk = k
+                        for p in prefixes:
+                            if kk.startswith(p):
+                                kk = kk[len(p) :]
+                        out[kk] = v
+                    return out
+
+                sd = _strip_prefix(sd)
+
+                # 宽松加载（不因 buffer/辅助权重缺失而报错）
+                missing, unexpected = model.load_state_dict(sd, strict=False)
+                print(
+                    f"[xtts] loaded with strict=False, missing={len(missing)}, unexpected={len(unexpected)}"
+                )
+
+        # 设备与 eval
+        model.eval()
         if self.device.startswith("cuda"):
-            model.cuda()
+            model.to(self.device)
         return model
 
     def inference(self, sentence: dict):
@@ -236,6 +366,7 @@ class Speaker:
         out_wav: str | None = None,
         out_json: str | None = None,
         clear_after: bool = True,
+        verbose: bool = True,
     ):
         """
         把 audio_play_queue 里的段落拼接导出：
@@ -243,7 +374,7 @@ class Speaker:
         - out_json: 同名 JSON（时间线与参数）
         - clear_after: 导出后是否清空播放队列
         """
-        if not self.audio_play_queue:
+        if not self.audio_play_queue and verbose:
             print("[speaker] [play]: queue is empty, nothing to output.")
             return None, None
 
@@ -291,13 +422,51 @@ class Speaker:
         with open(out_json, "w", encoding="utf-8") as f:
             json.dump(info, f, ensure_ascii=False, indent=2)
 
-        print(f"[speaker] [play]: wrote {out_wav}")
-        print(f"[speaker] [play]: wrote {out_json}")
+        if verbose:
+            print(f"[speaker] [play]: wrote {out_wav}")
+            print(f"[speaker] [play]: wrote {out_json}")
 
         if clear_after:
             self.audio_play_queue.clear()
 
         return out_wav, out_json
+
+    def say(self, word: str, root_abs_path: Path, verbose: bool = True):
+        t0 = time.time()
+
+        self.inference(
+            {
+                "text": word,
+                "emotion": "neutral",
+                "pad_ms": 150,
+            }
+        )
+        # -> tts_out/smoketest.wav
+        timestamp = int(time.time())
+        out_wav, out_json = self.play(
+            out_wav=f"{self.profile_name}_{timestamp}.wav", verbose=verbose
+        )
+        dt = time.time() - t0
+
+        if out_wav is not None:
+            winsound.PlaySound(
+                str(root_abs_path / out_wav),
+                # f"E:/0-19_VoidMate//P/tts_out/{self.profile_name}_{timestamp}.wav",
+                winsound.SND_FILENAME,
+            )
+        else:
+            print("[SMOKE] play: no audio to play")
+
+        if verbose:
+            print(f"[SMOKE] done in {dt:.2f}s")
+            if out_wav and os.path.exists(out_wav):
+                print(f"[SMOKE] WAV:  {out_wav}")
+            if out_json and os.path.exists(out_json):
+                with open(out_json, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+                print(
+                    f"[SMOKE] segments={len(meta['segments'])}, total_duration_s={meta['total_duration_s']}"
+                )
 
 
 if __name__ == "__main__":
@@ -309,46 +478,22 @@ if __name__ == "__main__":
     spk = Speaker(
         profile_name="test",
         pretrained_model_name=MODEL_NAME,  # noqa
-        wav_path=["tts/cloned_samples/output_merged.wav"],
+        wav_path=["cloned_samples/output_merged.wav"],
         source_wav_language="jp",
         output_lang="en-us",
+        out_dir="tts/output",
         # output_lang="zh-cn",
     )
 
     t0 = time.time()
-    # spk.inference(
-    #     {"text": "おはようございます。テストを始めます。", "emotion": "neutral"}
-    # )
-    # spk.inference(
-    #     {"text": "おはようございます。テストを始めます。", "emotion": "whisper"}
-    # )
-    # spk.inference(
-    #     {"text": "おはようございます。テストを始めます。", "emotion": "happy"}
-    # )
-    # spk.inference(
-    #     {"text": "おはようございます。テストを始めます。", "emotion": "comforting"}
-    # )
-    # spk.inference(
-    #     {"text": "おはようございます。テストを始めます。", "emotion": "lullaby"}
-    # )
-    # spk.inference(
-    #     {"text": "おはようございます。テストを始めます。", "emotion": "flirty"}
-    # )
 
-    # spk.inference({"text": "测试开始", "emotion": "neutral", "pad_ms": 150})
-    # spk.inference(
-    #     {"text": "这里是犬走椛，开始测试", "emotion": "neutral", "pad_ms": 150}
-    # )
-    # spk.inference({"text": "杀了他们", "emotion": "angry", "pad_ms": 150})
-
-    # spk.inference({"text": "测试开始", "emotion": "neutral", "pad_ms": 150})
-    # spk.inference(
-    #     {
-    #         "text": "盖伦,发发！盖伦,发发！盖伦,发发！盖伦,发发！盖伦,发发！盖伦,发发！盖伦,发发！盖伦,发发！盖伦,发发！盖伦,发发！盖伦,发发！",
-    #         "emotion": "neutral",
-    #         "pad_ms": 150,
-    #     }
-    # )
+    spk.inference(
+        {
+            "text": "test test test",
+            "emotion": "neutral",
+            "pad_ms": 150,
+        }
+    )
 
     out_wav, out_json = spk.play(out_wav="smoketest.wav")  # -> tts_out/smoketest.wav
     dt = time.time() - t0
