@@ -2,6 +2,7 @@ from typing import Any
 import os
 import json
 import time
+import shutil
 import numpy as np
 import torch
 import pathlib
@@ -432,6 +433,13 @@ class Speaker:
         return out_wav, out_json
 
     def say(self, word: str, root_abs_path: Path, verbose: bool = True):
+        """speak a single sentence ie. "Hello world"
+
+        Args:
+            word: str, the word to speak
+            root_abs_path: pathlib.Path the root path of project
+            verbose: bool, whether to print the debug info
+        """
         t0 = time.time()
 
         self.inference(
@@ -442,6 +450,7 @@ class Speaker:
             }
         )
         # -> tts_out/smoketest.wav
+
         timestamp = int(time.time())
         out_wav, out_json = self.play(
             out_wav=f"{self.profile_name}_{timestamp}.wav", verbose=verbose
@@ -468,68 +477,74 @@ class Speaker:
                     f"[SMOKE] segments={len(meta['segments'])}, total_duration_s={meta['total_duration_s']}"
                 )
 
+    def say_batch(
+        self, words: list[str] | str, root_abs_path: Path, verbose: bool = True
+    ):
+        """generate and speak a long text, receiveving the list[str] or str only
 
-if __name__ == "__main__":
-    import time, shutil
+        Args:
+            words: list[str] | str, the words to speak
+            root_abs_path: pathlib.Path, the root path of project, this function will automatically save the output to {root_proj/RuntimeCache/tts_out/*.wav}
+            verbose: bool, whether to print the debug info
 
-    print("=== SMOKE TEST: XTTS low-level + saved latents ===")
+        Returns:
+            [TODO:return]
 
-    # 可按需改：参考音色素材路径、语言（jp->ja 映射已在类里处理）
-    spk = Speaker(
-        profile_name="test",
-        pretrained_model_name=MODEL_NAME,  # noqa
-        wav_path=["cloned_samples/output_merged.wav"],
-        source_wav_language="jp",
-        output_lang="en-us",
-        out_dir="tts/output",
-        # output_lang="zh-cn",
-    )
+        Raises:
+            TypeError: [TODO:throw]
+        """
+        t0 = time.time()
+        sr = 24000  # 假设采样率（按你的 TTS 模型定）
+        out_dir = Path(root_abs_path) / "RuntimeCache" / "tts_out"
+        out_dir.mkdir(parents=True, exist_ok=True)
 
-    t0 = time.time()
+        # normalize input to list of segments
+        if isinstance(words, str):
+            segments = [words]
+        elif isinstance(words, list):
+            segments = [w.strip() for w in words if w.strip()]
+        else:
+            raise TypeError("words should be str or list[str]")
 
-    spk.inference(
-        {
-            "text": "test test test",
-            "emotion": "neutral",
-            "pad_ms": 150,
-        }
-    )
+        all_audio = []
+        for i, seg in enumerate(segments):
+            if verbose:
+                print(f"[TTS] segment {i + 1}/{len(segments)}: {seg[:40]}...")
 
-    out_wav, out_json = spk.play(out_wav="smoketest.wav")  # -> tts_out/smoketest.wav
-    dt = time.time() - t0
+            self.inference(
+                {
+                    "text": seg,
+                    "emotion": "neutral",
+                    "pad_ms": 150,
+                }
+            )
 
-    winsound.PlaySound(
-        "E:/0-19_VoidMate/Inubashiri/tts/tts_out/smoketest.wav", winsound.SND_FILENAME
-    )
+            tmp_wav, _ = self.play(out_wav=f"seg_{i}.wav", verbose=False)
+            if tmp_wav and os.path.exists(tmp_wav):
+                audio, sr = sf.read(tmp_wav)
+                all_audio.append(audio)
+            else:
+                print(f"[WARN] the {i + 1} segment generate failed, skip it.")
 
-    while True:
-        test_input: str = input()
-        test_emotion: str = input()
+        # 3. concat the generated segments
+        if not all_audio:
+            print("[ERR] no audio to generate, warn")
+            return None
 
-        if test_emotion not in spk.presets.keys():
-            test_emotion = "neutral"
+        concat_audio = np.concatenate(all_audio)
+        timestamp = int(time.time())
+        out_path = out_dir / f"{self.profile_name}_{timestamp}.wav"
+        sf.write(out_path, concat_audio, sr)
 
-        print(spk.presets.keys())
+        # 4. play sound and print log
+        winsound.PlaySound(str(out_path), winsound.SND_FILENAME)
 
-        if test_input.lower() == "exit":
-            print("[SMOKE] exiting...")
-            break
+        dt = time.time() - t0
+        if verbose:
+            print(f"[SMOKE] done in {dt:.2f}s")
+            print(f"[SMOKE] WAV: {out_path}")
+            print(
+                f"[SMOKE] segments={len(segments)}, total_duration_s≈{len(concat_audio) / sr:.1f}"
+            )
 
-        spk.inference({"text": test_input, "emotion": test_emotion, "pad_ms": 150})
-        spk.play(out_wav="smoketest.wav")  # -> tts_out/smoketest.wav
-        winsound.PlaySound(
-            "E:/0-19_VoidMate/Inubashiri/tts/tts_out/smoketest.wav",
-            winsound.SND_FILENAME,
-        )
-
-    # 打印结果与简单校验
-    print(f"[SMOKE] done in {dt:.2f}s")
-    if out_wav and os.path.exists(out_wav):
-        print(f"[SMOKE] WAV:  {out_wav}  ({shutil.get_terminal_size().columns} cols)")
-    if out_json and os.path.exists(out_json):
-        with open(out_json, "r", encoding="utf-8") as f:
-            meta = json.load(f)
-        print(f"[SMOKE] JSON: {out_json}")
-        print(
-            f"[SMOKE] segments={len(meta['segments'])}, total_duration_s={meta['total_duration_s']}"
-        )
+        return str(out_path)

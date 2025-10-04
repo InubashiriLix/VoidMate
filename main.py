@@ -10,11 +10,21 @@ from src.ai.interfaces.Interact import GeminiCompanion, Callbacks, log, Companio
 from src.tts.speaker import Speaker
 
 
-def _detect_profile_file(prompt: str, cwd: Path, endwith: str) -> list[Path]:
+def _detect_profile_file(prompt: str, root_proj_path: Path, endwith: str) -> list[Path]:
+    """detect the profile files in the profile directory
+
+    Args:
+        prompt: the input prompt to show
+        root_proj_path: the root project path
+        endwith: the extension to filter the files
+
+    Returns:
+        return the list of detected files, and it might be empty, check pls.
+    """
     print(prompt)
     rtn_list = [
         f
-        for f in (cwd / "Profile").rglob("*")
+        for f in (root_proj_path / "Profile").rglob("*")
         if f.is_file() and f.name.endswith(endwith)
     ]
     print("done")
@@ -24,6 +34,17 @@ def _detect_profile_file(prompt: str, cwd: Path, endwith: str) -> list[Path]:
 def _select_file_from_list(
     file_list: list[Path], prompt: str, default_value: str, input_func=input
 ) -> str:
+    """the user-interactive file selector from the given file list
+
+    Args:
+        input_func the input function, default to built-in input(), can be replaced for test
+        file_list: the file list to seelct from
+        prompt: the input prompt to show
+        default_value: the default value to return if the input is invalid
+
+    Returns:
+        the selected file path as str, or the default value if input is invalid
+    """
     for i, fp in enumerate(file_list):
         print(f"{i}: {fp.name}")
     sele_idx = input_func(prompt)
@@ -34,6 +55,11 @@ def _select_file_from_list(
 
 
 def setup() -> CompanionConfigs:
+    """setup the companion configs interactively
+
+    Returns:
+        return the CompanionConfigs object
+    """
     print("======================== setup =================================")
     current_dir: Path = pathlib.Path(__file__).parent
     print("current_dir: ", current_dir)
@@ -87,6 +113,11 @@ def setup() -> CompanionConfigs:
 
 
 def setup_speaker() -> Speaker:
+    """setup the TTS speaker
+
+    Returns:
+        the TTS Speaker object
+    """
     # TODO: add systematic profile ini config, and add the speaker model name into it
     # 1. add the speaker model name
     # 2. add output language into it
@@ -102,6 +133,14 @@ def setup_speaker() -> Speaker:
 
 
 def setup_campanion(confs: CompanionConfigs) -> GeminiCompanion:
+    """setup the Gemini companion bot
+
+    Args:
+        confs: CompanionConfig object, which should be initialized by setup() function
+
+    Returns:
+        companion bot object
+    """
     cb = Callbacks(on_message=lambda m: log(f"AI reply：{m}"))
     bot = GeminiCompanion(
         callbacks=cb, confs=confs, api_key=os.getenv("GOOGLE_API_KEY")
@@ -129,6 +168,7 @@ if __name__ == "__main__":
 
         # workers
         def producer():
+            """the producer thread, use the Gemini bot to chat and push the reply the the tts queue"""
             try:
                 while True:
                     enter = input("enter your next msg (type 'exit' to quit): ")
@@ -154,6 +194,7 @@ if __name__ == "__main__":
                 tts_queue.put(SENTINEL)
 
         def consumer():
+            """pop the tts queue and use the speaker to say the text"""
             try:
                 while True:
                     try:
@@ -164,13 +205,15 @@ if __name__ == "__main__":
                     if item is SENTINEL:
                         break
 
-                    # 兼容 list[str] 或 str
+                    # support list[str] or str
                     lines = item if isinstance(item, list) else [str(item)]
-                    for line in lines:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        spk.say(line, cwd, verbose=False)
+                    spk.say_batch(words=lines, root_abs_path=cwd, verbose=False)
+
+                    # for line in lines:
+                    #     line = line.strip()
+                    #     if not line:
+                    #         continue
+                    #     spk.say(line, cwd, verbose=False)
 
             except Exception as e:
                 log(f"TTS consumer error: {e}")
