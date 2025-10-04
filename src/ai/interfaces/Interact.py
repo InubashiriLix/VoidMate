@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import pathlib
+from typing import Union
 from pathlib import Path
 import traceback
 import string
@@ -46,6 +47,11 @@ def log(msg: str):
 #
 #     def log(msg: str):
 #         print(f"[Companion] {msg}")
+
+
+class MyConfigParser(configparser.ConfigParser):
+    def optionxform(self, optionstr):
+        return optionstr.lower()
 
 
 # -----------------------------
@@ -259,23 +265,80 @@ class GeminiCompanion:
         log(f"已创建默认角色 INI：{self.role_ini}")
 
     def _load_role_ini(self) -> Dict[str, Any]:
-        cfg = configparser.ConfigParser()
+        def _get(cfg, sec, opt, fallback=""):
+            return cfg.get(sec, opt, fallback=fallback).strip()
+
+        def _maybe_list(value: str) -> Union[str, List[str]]:
+            """
+            把多行或使用顿号/分号/逗号分隔的字段，智能转成列表。
+            规则：
+            - 若包含换行：按行拆，去掉以“- ”或“• ”开头的前缀。
+            - 否则若包含 “、/；/; /，/,”：按这些分隔符拆。
+            - 只返回非空条目；若最终只有1项，直接返回原字符串以免过度结构化。
+            """
+            if not value:
+                return ""
+            lines = [l.strip(" \t-•") for l in value.splitlines() if l.strip()]
+            if len(lines) > 1:
+                items = [l for l in lines if l]
+                return items if len(items) > 1 else value
+
+            seps = ["、", "；", ";", "，", ","]
+            if any(s in value for s in seps):
+                tmp = value
+                for s in seps:
+                    tmp = tmp.replace(s, "§")
+                items = [x.strip() for x in tmp.split("§") if x.strip()]
+                return items if len(items) > 1 else value
+
+            return value
+
+        cfg = MyConfigParser()
+        # 保留大小写无所谓，但为一致性统一转小写键
         cfg.read(self.role_ini, encoding="utf-8")
-        return {
-            "name": cfg.get("meta", "name", fallback="Mirai"),
-            "lang": cfg.get("meta", "lang", fallback="auto"),
-            "era": cfg.get("persona", "era", fallback="当代"),
-            "values": cfg.get("persona", "values", fallback="善良、真诚"),
-            "appearance": cfg.get("persona", "appearance", fallback="亲切友好"),
-            "persona_summary": cfg.get("persona", "summary", fallback="温柔、耐心"),
-            "persona_style": cfg.get("persona", "style", fallback="自然口语"),
-            "relationship": cfg.get("persona", "relationship", fallback="知心朋友"),
-            "boundaries": cfg.get("boundaries", "text", fallback=""),
-            "tone_default": cfg.get("tone", "default", fallback="gentle"),
-            "tone_allowed": cfg.get(
-                "tone", "allowed", fallback="gentle,teasing,serious,playful,comforting"
+
+        # ——原有字段：保持不变——
+        data: Dict[str, Any] = {
+            "name": _get(cfg, "meta", "name", fallback="Mirai"),
+            "lang": _get(cfg, "meta", "lang", fallback="auto"),
+            "era": _get(cfg, "persona", "era", fallback="当代"),
+            "values": _get(cfg, "persona", "values", fallback="善良、真诚"),
+            "appearance": _get(cfg, "persona", "appearance", fallback="亲切友好"),
+            "persona_summary": _get(cfg, "persona", "summary", fallback="温柔、耐心"),
+            "persona_style": _get(cfg, "persona", "style", fallback="自然口语"),
+            "relationship": _get(cfg, "persona", "relationship", fallback="知心朋友"),
+            "boundaries": _get(cfg, "boundaries", "text", fallback=""),
+            "tone_default": _get(cfg, "tone", "default", fallback="gentle"),
+            "tone_allowed": _get(
+                cfg,
+                "tone",
+                "allowed",
+                fallback="gentle,teasing,serious,playful,comforting",
             ),
         }
+
+        # ——新增：把所有额外分区装进来（含 character / task_profile 等）——
+        extras: Dict[str, Dict[str, Any]] = {}
+        for section in cfg.sections():
+            if section in {"meta", "persona", "boundaries", "tone"}:
+                continue
+            sect_dict: Dict[str, Any] = {}
+            for k, v in cfg.items(section):
+                sect_dict[k] = _maybe_list(v.strip())
+            extras[section] = sect_dict
+
+        # 若存在结构化关键信息，顺手“提升”一份到顶层（方便直接访问）
+        if "character" in extras:
+            data["character"] = extras["character"]
+        if "task_profile" in extras:
+            data["task_profile"] = extras["task_profile"]
+
+        # 其余分区统一放在 extras 里
+        data["extras"] = {
+            k: v for k, v in extras.items() if k not in {"character", "task_profile"}
+        }
+
+        return data
 
     def _system_instruction(self) -> str:
         tpl = string.Template(SYSTEM_PROMPT_TEMPLATE)
