@@ -91,7 +91,12 @@ SYSTEM_PROMPT_TEMPLATE = r"""你是一个人格化的 AI 伴侣，需具备以�
 - 人设摘要：$persona_summary
 - 说话风格：$persona_style
 - 与用户关系：$relationship（据此选择称呼）
+- 对用户的称呼（若有）：$user_nickname
 - 禁止事项：$boundaries
+- 避免使用的词句（若有）：$words_to_avoid
+
+【扩展设定】
+$extras_block
 
 【长度与格式要求】
 - 只能返回一段 JSON；不要出现任何 Markdown 代码块（禁止 ```），不要多余解释。
@@ -299,9 +304,29 @@ class GeminiCompanion:
 
     # ---------------- Persona ----------------
     def _ensure_role_ini(self):
+        """
+        If Profile/role.ini is missing:
+        - Prefer copying from env COMPANION_ROLE_TEMPLATE (a file path).
+        - Otherwise, write a minimal default template.
+        """
         p = pathlib.Path(self.role_ini)
         if p.exists():
             return
+
+        tpl = os.environ.get("COMPANION_ROLE_TEMPLATE", "").strip()
+        if tpl:
+            try:
+                src = pathlib.Path(tpl).expanduser()
+                if src.is_file():
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                    p.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+                    log(f"已从模板复制角色 INI：{src} → {self.role_ini}")
+                    return
+                else:
+                    log(f"环境模板不存在：{src}，将回退到内置默认。")
+            except Exception as e:
+                log(f"从模板复制 role.ini 失败：{e}，回退到内置默认。")
+
         cfg = configparser.ConfigParser()
         cfg["meta"] = {"name": "Mirai", "lang": "auto"}
         cfg["persona"] = {
@@ -319,6 +344,7 @@ class GeminiCompanion:
             "default": "gentle",
             "allowed": "gentle,teasing,serious,playful,comforting",
         }
+        p.parent.mkdir(parents=True, exist_ok=True)
         with p.open("w", encoding="utf-8") as f:
             cfg.write(f)
         log(f"已创建默认角色 INI：{self.role_ini}")
@@ -382,7 +408,7 @@ class GeminiCompanion:
             ),
         }
 
-        # ——新增：把所有额外分区装进来（含 character / task_profile 等）——
+        # ——新增：把所有额外分区装进来（含 character / task_profile / personalization_placeholders 等）——
         extras: Dict[str, Dict[str, Any]] = {}
         for section in cfg.sections():
             if section in {"meta", "persona", "boundaries", "tone"}:
@@ -398,12 +424,51 @@ class GeminiCompanion:
         if "task_profile" in extras:
             data["task_profile"] = extras["task_profile"]
 
+        # ★ personalization_placeholders：抽取昵称与避免用词
+        if "personalization_placeholders" in extras:
+            data["personalization_placeholders"] = extras["personalization_placeholders"]
+            data["user_nickname"] = _first_str(
+                extras["personalization_placeholders"].get("your_nickname", "")
+            )
+            data["words_to_avoid"] = extras["personalization_placeholders"].get(
+                "words_to_avoid", []
+            )
+
         # 其余分区统一放在 extras 里
         data["extras"] = {
-            k: v for k, v in extras.items() if k not in {"character", "task_profile"}
+            k: v
+            for k, v in extras.items()
+            if k not in {"character", "task_profile", "personalization_placeholders"}
         }
 
         return data
+
+    def _format_extras_for_prompt(self) -> str:
+        """Compact important extra sections into short, model-friendly lines."""
+        ex = self.role.get("extras", {})
+        if not ex:
+            return ""
+        # Keep prompt size under control: only allow key sections and trim long values
+        allow = {
+            "communication_style", "companion_mode", "relationship_rules",
+            "topics", "personal_flair", "quick_commands",
+            "templates", "light_planning", "repair"
+        }
+        lines = []
+        for section, kv in ex.items():
+            if section not in allow:
+                continue
+            lines.append(f"[{section}]")
+            for k, v in (kv or {}).items():
+                if isinstance(v, list):
+                    vv = "; ".join(str(x).strip() for x in v if str(x).strip())
+                else:
+                    vv = str(v).strip()
+                # Trim very long lines to avoid bloating the prompt
+                if len(vv) > 200:
+                    vv = vv[:200] + "…"
+                lines.append(f"- {k}: {vv}")
+        return "\n".join(lines)
 
     def _system_instruction(self) -> str:
         tpl = string.Template(SYSTEM_PROMPT_TEMPLATE)
@@ -417,10 +482,13 @@ class GeminiCompanion:
             persona_summary=self.role["persona_summary"],
             persona_style=self.role["persona_style"],
             relationship=self.role["relationship"],
+            user_nickname=self.role.get("user_nickname", ""),
             boundaries=self.role["boundaries"],
+            words_to_avoid=", ".join(self.role.get("words_to_avoid", [])) if isinstance(self.role.get("words_to_avoid"), list) else (self.role.get("words_to_avoid", "") or ""),
             sent_limit=SENT_TOKEN_LIMIT,
             zh_hint=ZH_SENT_CHAR_HINT,
             en_hint=EN_SENT_WORD_HINT,
+            extras_block=self._format_extras_for_prompt(),   
         )
 
     # ---------------- DB ----------------
@@ -632,7 +700,7 @@ class GeminiCompanion:
         last_day = datetime.date.today()
 
         while not self._stop_flag:
-            self._maybe_reload_ini()
+            self._maybe_reload_ini()  # keep persona fresh inside scheduler
             try:
                 now = datetime.datetime.now(self.tz)
                 day = now.date()
@@ -1354,3 +1422,4 @@ class GeminiCompanion:
     def close(self):
         self._stop_flag = True
         log("已请求停止调度线程。")
+
