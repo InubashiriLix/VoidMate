@@ -141,7 +141,7 @@ def setup_campanion(confs: CompanionConfigs) -> GeminiCompanion:
     Returns:
         companion bot object
     """
-    cb = Callbacks(on_message=lambda m: log(f"AI reply：{m}"))
+    cb = Callbacks()
     bot = GeminiCompanion(
         callbacks=cb, confs=confs, api_key=os.getenv("GOOGLE_API_KEY")
     )
@@ -161,10 +161,7 @@ if __name__ == "__main__":
         spk = setup_speaker()
 
         # quick self-test
-        spk.say(
-            "Your best grab a blade to slap upon your belt. You gonna need it.", cwd
-        )
-        print(bot.chat("I'm back again")["text"]["en"])
+        spk.say("Welcome back.", cwd)
 
         # workers
         def producer():

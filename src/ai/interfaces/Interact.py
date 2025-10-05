@@ -1,6 +1,7 @@
 # gemini_companion.py — persona + bilingual + robust parsing + per-sentence 250-token limit
 from __future__ import annotations
 
+
 import pathlib
 from typing import Union
 from pathlib import Path
@@ -20,6 +21,7 @@ from typing import Callable, Optional, List, Dict, Any
 
 # Gemini Official SDK
 from google import genai
+from google.auth import default
 from google.genai import types
 
 # Your multimodal analysis helper (you provided this)
@@ -191,12 +193,50 @@ DIARY_INSTRUCTION = """你是一个有人设的 AI，要写“当日日记条目
 """
 
 
-@dataclass
 class Callbacks:
-    on_message: Optional[Callable[[Dict[str, Any]], None]] = None
-    on_imagination: Optional[Callable[[Dict[str, Any]], None]] = None
-    on_observe: Optional[Callable[[Dict[str, Any]], None]] = None
-    on_schedule_emit: Optional[Callable[[Dict[str, Any]], None]] = None
+    """the callbacks for several events, set the callback function as none CAN SHUT THE INFO UP.
+        it is suggested to set the on_schedule_emit callback as none
+    Attributes:
+        [NOTE: these callbacks have default callable functions, you can check the inner static method in this class]
+        on_message: Optional[Callable[[Dict[str, Any]], None]], def default_reply method
+        on_imagination: Optional[Callable[[Dict[str, Any]], None]], def None
+        on_observe: Optional[Callable[[Dict[str, Any]], None]], def default_reply method
+        on_schedule_emit: Optional[Callable[[Dict[str, Any]], None]], def default_schedule_emit method
+    """
+
+    def __init__(
+        self,
+        on_message: Optional[Callable[[Dict[str, Any]], None]] = None,
+        on_imagination: Optional[Callable[[Dict[str, Any]], None]] = None,
+        on_observe: Optional[Callable[[Dict[str, Any]], None]] = None,
+        on_schedule_emit: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ):
+        self.on_message = on_message or self.default_reply
+        self.on_imagination = on_imagination
+        self.on_observe = on_observe or self.default_reply
+        self.on_schedule_emit = on_schedule_emit or self.default_schedule_emit
+
+    @staticmethod
+    def default_reply(data: Dict[str, Any]) -> None:
+        """simply print the reply to console
+
+        Args:
+            data: the FORMATED msg dict
+        """
+        log("=========================================================")
+        # use print for being prettier
+        print(f"[CN]: \n{data['text']['zh']}")
+        print(f"[EN]: \n{data['text']['en']}")
+        log("=========================================================")
+
+    @staticmethod
+    def default_schedule_emit(data: Dict[str, Any]) -> None:
+        """simply print the schedule emit into the console
+
+        Args:
+            data: the processed schedule item dict
+        """
+        log("save summary done")  # just for debug
 
 
 class GeminiCompanion:
@@ -1106,7 +1146,7 @@ class GeminiCompanion:
 
             # 入库
             self._save_summary(data)
-            log("save summary done")
+            # log("save summary done") # just for debug
 
         except Exception as e:
             log(f"summarize error: {e}")
