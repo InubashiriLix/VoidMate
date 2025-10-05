@@ -267,6 +267,7 @@ class GeminiCompanion:
 
         self._ensure_role_ini()
         self.role = self._load_role_ini()
+        self._role_ini_mtime = os.path.getmtime(self.role_ini)  # 记录当前 mtime
         self._init_db()
         self._load_schedule()
 
@@ -277,6 +278,24 @@ class GeminiCompanion:
         self._scheduler_thread.start()
 
         log("GeminiCompanion 已初始化。")
+
+    def _maybe_reload_ini(self):
+        """role.ini 被修改就热重载；失败不抛错，打印日志即可。"""
+        try:
+            cur = os.path.getmtime(self.role_ini)
+        except Exception as e:
+            log(f"role.ini mtime 获取失败：{e}")
+            return
+        if getattr(self, "_role_ini_mtime", None) != cur:
+            try:
+                self.role = self._load_role_ini()
+                self._role_ini_mtime = cur
+                log(f"role.ini reloaded → {self.role_ini} (mtime={cur})")
+            except Exception as e:
+                log(f"role.ini 重载失败：{e}")
+
+    def reload_persona(self):
+        self._maybe_reload_ini()
 
     # ---------------- Persona ----------------
     def _ensure_role_ini(self):
@@ -307,6 +326,12 @@ class GeminiCompanion:
     def _load_role_ini(self) -> Dict[str, Any]:
         def _get(cfg, sec, opt, fallback=""):
             return cfg.get(sec, opt, fallback=fallback).strip()
+
+        def _first_str(x) -> str:
+            """把 _maybe_list 的返回变成一个可用的标量字符串。"""
+            if isinstance(x, list):
+                return str(x[0]).strip() if x else ""
+            return str(x).strip() if x is not None else ""
 
         def _maybe_list(value: str) -> Union[str, List[str]]:
             """
@@ -607,6 +632,7 @@ class GeminiCompanion:
         last_day = datetime.date.today()
 
         while not self._stop_flag:
+            self._maybe_reload_ini()
             try:
                 now = datetime.datetime.now(self.tz)
                 day = now.date()
@@ -1011,6 +1037,7 @@ class GeminiCompanion:
     # ---------------- Chat ----------------
     def chat(self, user_text: str, forced_tone: Optional[str] = None) -> Dict[str, Any]:
         self._save_message("user", user_text)
+        self._maybe_reload_ini()
 
         system_instruction = self._system_instruction()
         if forced_tone:

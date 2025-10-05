@@ -145,6 +145,7 @@ def setup_campanion(confs: CompanionConfigs) -> GeminiCompanion:
     bot = GeminiCompanion(
         callbacks=cb, confs=confs, api_key=os.getenv("GOOGLE_API_KEY")
     )
+    bot._maybe_reload_ini()
     return bot
 
 
